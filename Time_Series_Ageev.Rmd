@@ -1,0 +1,548 @@
+---
+title: "Анализ временного ряда"
+author: "Владимир Агеев"
+output: 
+  html_notebook:
+      toc: yes
+      toc_float: yes
+      toc_depth: 3
+---
+```{r, echo=FALSE, include=FALSE}
+library(dplyr)
+library(forecast)
+library(Rssa)
+```
+
+#Временной ряд
+
+Данные -- траты жителей Великобритании за рубежом с января 1980г. по декабрь 2016г. в миллионах £.
+
+Чуть более свежие данные можно найти здесь: https://www.ons.gov.uk/peoplepopulationandcommunity/leisureandtourism/timeseries/gmam/ott
+```{r}
+uk <- read.csv("UK.csv", sep = ',', stringsAsFactors = FALSE)
+uk <- ts(uk$EXPEND, start = c(1980, 1), frequency = 12)
+
+df.uk <- data.frame(seq.Date(from = as.Date("1980-01-01"), to = as.Date("2016-12-01"), by = "month"), uk)
+colnames(df.uk) <- c("DATE", "EXP")
+tail(uk, 24)
+```
+```{r, fig.width= 10, fig.height= 5}
+plot(uk)
+```
+Тренд сначала похож на линейный, примерно в 2008 году резко меняется. Имеет смысл рассматривать только конец ряда, сославшись на то, что резкое изменение тренда связано с финансовым кризисом.
+
+Модель не аддитивная, амплитуда сезонной компоненты не постоянна. Посмотрим, что происходит при логарифмировании.
+
+```{r, fig.width= 10, fig.height= 5}
+plot(log(uk))
+```
+
+Амплитуда не постоянна, значит, модель не является мультипликативной. 
+
+#Периодограмма
+$(x_1, \ldots, x_N)$ -- ряд. 
+
+Представим его в виде
+$x_n = C_0 + \sum\limits_{k=1}^{[(N-1)/2]}(C_kcos(2\pi n k/N) + S_ksin(2\pi n k/N))$  ($+ C_{N/2}(-1)^n$), если $N$ -- четное.
+
+Общий вид периодограммы:
+
+$\widetilde{П}_x^N(w) = \frac{1}{N}|\sum\limits_{n = 0}^{N - 1} e^{-2\pi iwn} x_{n + 1}|^2$, $w \in (-1/2, 1/2)$
+
+Так как ряд вещественный,  рассматриваем
+$П_x^N(k/N) = \frac{N}{2}\begin{cases}
+2C_0^2, &k = 0\\
+C_k^2 + S_k^2, &0 < k < \frac{N}{2}\\
+2C_{N/2}^2, &k = \frac{N}{2}
+\end{cases}$
+
+
+
+```{r, fig.width= 10, fig.height= 5}
+spec.pgram(uk, detrend = FALSE, fast = FALSE, log='no', xaxt = 'n')
+axis(1, at = c(0,1,2,3,4,5,6), labels = c('0', '1/12', '2/12', '3/12', '4/12', '5/12', '6/12'))
+```
+```{r, fig.width= 10, fig.height= 5}
+spec.pgram(uk, detrend = TRUE, fast = FALSE, log='no', xaxt = 'n')
+axis(1, at = c(0,1,2,3,4,5,6), labels = c('0', '1/12', '2/12', '3/12', '4/12', '5/12', '6/12'))
+```
+Заметны периоды 12 (год), 6 (полгода), 4 (квартал), 2.4, 2 и частота близкая к нулю.
+
+
+##Отступление: Пример про растекание частоты
+```{r, fig.width= 10, fig.height= 5}
+par(mfrow=c(1,2))
+spec.pgram(cos(2*pi*1:92/10), detrend = FALSE, fast = FALSE, log='yes', taper=0, pad=0) #растекается
+spec.pgram(cos(2*pi*1:100/10), detrend = FALSE, fast = FALSE, log='yes', taper=0, pad = 0)#не растекается
+```
+
+##Отступление: белый шум
+
+* $w_t, t = 0, \pm 1, \pm 2, \ldots$ -- некоррелированые случайные величины, $\mathbb{E}w_t = 0,~\sigma_w^2$, пишут, например, $w_t \sim wn(0,~\sigma_w^2)$.
+
+* если кроме того $w_t$ -- iid, пишут $iid(0,~\sigma_w^2)$
+
+* если $w_t$ -- iid и $w_t \sim N(0, ~\sigma_w^2)$, шум гауссовский
+
+Периодограмма гауссовского шума
+```{r, fig.width= 10, fig.height= 5}
+wn <- ts(rnorm(1000))
+spec.pgram(wn, detrend = FALSE, log = 'no')
+```
+
+
+
+
+```{r, fig.width= 10, fig.height= 5}
+spec.pgram(wn, detrend = FALSE, log = 'yes')
+```
+
+
+
+Автоковариационная функция
+```{r, fig.width= 10, fig.height= 5}
+acf(wn)
+```
+
+
+
+#Cглаживание временного ряда и выделение тренда
+
+Тренд -- полиномиальная аппроксимация некоторой параметрической функции.
+
+Тренд -- медленно меняющаяся компонента ряда.
+
+Тренд -- случайный процесс.
+
+Чем отличается сглаживание от выделения тренда?
+
+* Сглаживание даст медленно меняющуюся компоненту. Если понимать тренд как некоторую неслучайную функцию, то можем получить тренд, а можем и нет.
+
+
+##Линейный фильтр, FIR, причинный фильтр, АЧХ, ФЧХ 
+$x_n$ -- ряд.
+
+Фильтры
+
+* $y_j = (\Phi(X))_j = \sum\limits_{i = -\infty}^{\infty} h_i x_{j- i}$ -- линейный фильтр
+
+* $\{h_i\}$ -- импульсная характеристика (impulse response)
+
+* FIR -- finite impulse response, конечное число $h_i$ ненулевые, т.е. $(\Phi(X))_j = \sum\limits_{i = -r_1}^{r_2} h_i x_{j- i}$
+
+* Причинный фильтр (casual filter), смотрим только в "прошлое": $(\Phi(X))_j = \sum\limits_{i = 0}^{r} h_i x_{j- i}$
+
+АЧХ, ФЧХ
+
+* $H_{\Phi}(z) = \sum\limits_i h_i z^{-i}$ -- передаточная функция (transfer function)
+
+* $|H_{\Phi}(e^{i2\pi w})|$ -- Амплитудно частотная характеристика (АЧХ, frequency response), показывает как меняется амплитуда в зависимости от частоты
+
+* $\varphi_\Phi(w) = Arg H_{\Phi}(\varphi^{i2\pi w})$ -- Фазочастотная характеристика (phase response)
+
+##Cкользящее среднее
+
+Скользящее среднее -- линейный фильтр, для которого $h_i = \frac{1}{2M + 1}$.
+
+
+```{r}
+MovAvg <- function(series, M){
+  
+  avg <- sapply(1:length(series), FUN = function(i){
+    l <- ((i-M):(i-1))
+    l <- l[l > 0]
+    
+    r <- ((i + 1):(i+M))
+    r <- r[r <= length(series)]
+    
+    h <- 1/(length(r) + length(l) + 1)
+    
+    sum(series[c(l,i,r)] * h) 
+  })
+}
+
+
+frequencyResponse <- function(h, w){
+  fr <- w
+  if(max(fr) > 0.5) fr <- fr / (max(w) * 2)
+  sapply(fr, function(freq){
+    cs <- cos(2*pi*freq *(1:length(h)))
+    pr <- h * cs
+    return(abs(sum(pr)))
+  })
+}
+
+periodogramBuilder <- function(series, filtered){
+   par(mfrow=c(1,3))
+   
+   sp.initial <- spec.pgram(series, detrend = FALSE, fast = FALSE, log='no', taper=0)
+   sp.filtered <- spec.pgram(na.omit(filtered), detrend = FALSE, fast = FALSE, log='no', taper=0)
+   sp.difference <- spec.pgram(na.omit(series - filtered), detrend = FALSE, fast = FALSE, log='no', taper=0)
+   par(mfrow=c(1,1))
+}
+
+
+movingAverageFiltering <- function(timeSeries,m){
+  if( !is.ts(timeSeries)){
+    stop("Object given is not a ts object!")
+  }
+  
+  par(mfrow=c(1,1))
+  #Initial
+  plot(timeSeries, type='l', lty=2, ylab = 'Rate')
+  
+  h <- rep(1,(2*m+1))/(2*m+1)
+  #average
+  filtered <- ts(MovAvg(timeSeries, m), start = c(1980, 1), frequency = 12) 
+  lines(filtered, col='red')
+  #difference (detrended)
+  difference <- timeSeries - filtered
+  plot(difference, type = 'l')
+  
+  #comparing periodograms
+  periodogramBuilder(timeSeries, filtered)
+
+  #Frequency response
+  par(mfrow=c(1,1))
+  sp.filtered <- spec.pgram(na.omit(filtered), detrend = FALSE, fast = FALSE, log='no', taper=0, plot = FALSE)
+  fr.filtered <- frequencyResponse(h, sp.filtered$freq)
+  plot(x = sp.filtered$freq, y = fr.filtered, type = 'l', xlab = "frequency", ylab = "response")
+}
+```
+
+Сгладим ряд. Выберем окно кратное 12, чтобы убрать сезонность.
+```{r, fig.width=10, fig.height=5}
+movingAverageFiltering(uk, 12)
+```
+Вся периодика ушла в остаток. Компонента, соответствующая низкой частоте, смешалась с трендом.
+
+Увиличиваем окно
+```{r, fig.width=10, fig.height=5}
+movingAverageFiltering(uk, 24)
+movingAverageFiltering(uk, 36)
+movingAverageFiltering(uk, 60)
+```
+Чем больше окно, тем сильнее подавляем высокие частоты, что видно по АЧХ.
+
+"Low-pass filter" -- высокие частоты убираем, низкие оставляем.
+
+##Смещение при сглаживании фильтром скользящего среднего. Роль второй производной
+
+Общий вид фильтра:
+\begin{align*}
+  y(a) = \int_{-\delta}^{\delta} f(a + x) w(x) dx, \quad \int_{-\delta}^{\delta} w(x)dx = 1,\quad \int_{-\delta}^{\delta} x w(x)dx = 0. 
+\end{align*}
+
+Пусть $f$ -- некоторая гладкая функция, применим к ней фильтр.
+
+\begin{align*}
+  f(a + x) = f(a) + f'(a)x + f''(a)\frac{x^2}{2} + \ldots,\\
+  y(a) \approx f(a) + f'(a) 0 + f''(a)\frac{x^2}{2} \int_{-\delta}^{\delta} x^2 w(x)dx.
+\end{align*}
+
+В случае скользящего среднего $w(x) = \frac{1}{2\delta}$, следовательно, у нас всегда будет смещение $\approx \frac{\delta^2}{3} \frac{f''(a)}{2}$. 
+
+##Отступление: перерисовка и запаздывание
+Перерисовка
+
+Возникает из-за того, что нам нехватает точек справа, чтобы посчитать среднее. При добавлении новой точки среднее пересчитывается.
+
+
+Последовательно добавляем последние 100 точек.
+```{r}
+plot(y = uk, x = (1:444), type = 'l')
+for(i in 100:1){
+  ma <- MovAvg(head(uk, -i), 12)
+  lines(ma, type = 'l', col = 'red', ylim = c(0, 6000), xlim = c(0, 450))
+}
+```
+
+Запаздывание
+
+Рассмотрим причинный фильтр, например скользящее среднее, которое считается только по "прошлому".
+
+```{r}
+MovAvg.cause <- function(series, M){
+  avg <- sapply(1:length(series), FUN = function(i){
+    l <- ((i- M + 1):(i-1))
+    l <- l[l > 0]
+    h <- 1/length(l)
+    sum(series[c(l,i)] * h) 
+  })
+}
+```
+
+```{r}
+plot(y = uk, x = (1:444), type = 'l')
+ma.c <- MovAvg.cause(uk, 24)
+ma <- MovAvg(uk, 24)
+lines(ma.c, type = 'l', col = 'red', ylim = c(0, 6000), xlim = c(0, 450))
+lines(ma, type = 'l', col = 'blue', ylim = c(0, 6000), xlim = c(0, 450))
+legend("topleft", c("Usual", "Casual"), lty=c(1,1), lwd=c(2.5,2.5),col=c("blue","red"))
+```
+Видно, что casual фильтр "догоняет" обычное среднее только через  некоторое количество точек.
+
+
+
+##Скользящая медиана
+
+В отличие от скользяещего среднего, устойчива к аутлаерам. Но негладкая и не является оценкой м.о. для несимметричного ряда. Иногда сначала применяют скользящую медиану, а потом результат сглаживают скользящим средним. 
+
+```{r, fig.width=10, fig.height=5}
+movingMedianFiltering <- function(timeSeries,k){
+  if( !is.ts(timeSeries)){
+    stop("Object given is not a ts object!")
+  }
+  
+  par(mfrow=c(1,1))
+  #Initial
+  plot(timeSeries, type='l', lty=2, ylab = 'Rate')
+  #median
+  filtered <- runmed(timeSeries, k)
+  lines(ts(filtered, start = c(1980, 1), frequency = 12 ) , col='red', type='l')
+  #difference (detrended)
+  difference <- timeSeries - filtered
+  plot(difference, type = 'l')
+  
+  #comparing periodograms
+  
+  periodogramBuilder(timeSeries, filtered)
+}
+
+
+movingMedianFiltering(uk, 13)
+```
+
+##Разность первого порядка
+```{r, fig.width=10, fig.height=5}
+df <- diff(uk)
+h.df <- c(-1,1)
+plot(df, type='l', main='difference')
+par(mfrow=c(1,2))
+sp.initial <- spec.pgram(uk, detrend = FALSE, fast = FALSE, log='no', taper=0)
+sp.df <- spec.pgram(na.omit(df), detrend = FALSE, fast = FALSE, log='no', taper=0)
+par(mfrow=c(1,1))
+fr.df <- frequencyResponse(h.df, sp.df$freq/12)
+plot(x = sp.df$freq, y = fr.df, type = 'l', xlab = 'frequency', ylab = 'response')
+
+```
+"High-pass filter" -- пропускает высокие частоты, низкие убирает.
+
+Почему переход к разностям это хорошо?
+
+* Если модель нашего ряда имеет вид $x_t = \mu_t + y_t$, где $\mu_t$ -- тренд, $y_t$ -- стационарный процесс, то при переходе к разностям получим стационарный ряд, особенно, если тренд фиксирован (например, линейный)
+
+* Уберем низкие частоты, усилим вклад высоких
+
+* Уберем линейный тренд (если перейдем к разностям второго порядка, то квадратичный и т.д.)
+
+Минусы
+
+* Увеличиваем вклад шума
+
+
+
+#Сглаживание и выделение тренда с помощью регрессии
+##Линейная регрессия
+
+```{r, fig.width=10, fig.height=5}
+fit <- lm(df.uk$EXP ~ df.uk$DATE, unemployment.data)
+plot(df.uk, type='l')
+abline(fit, col='red')
+periodogramBuilder(df.uk$EXP, fit$fitted.values)
+plot(fit$residuals, type='l')
+```
+
+##Полиномиальная регрессия
+```{r}
+cs <- cos(2*pi*(1:length(uk))/12)
+sn <- sin(2*pi*(1:length(uk))/12)
+
+fit <- lm(EXP ~ stats::poly(df.uk$DATE, 10)
+                  , df.uk)
+plot(df.uk, type='l', ylab="EXP")
+lines(y= fitted(fit), x= df.uk$DATE, col='red')
+plot(fit$residuals, type='l')
+periodogramBuilder(df.uk$EXP, fit$fitted.values)
+```
+
+##Kernel Smoothing (kernel regression)
+
+Kernel Smoothing -- скользящее среднее, в котором используется весовая функция (kernel).
+
+Cчитаем, что наш ряд имеет вид:
+\begin{align*}
+  x_t = f_t + y_t,
+\end{align*}
+где $f_t$ -- некоторая гладкая функция, $y_t$ -- стационарный процесс. Тогда 
+\begin{align*}
+\hat{f}_t = \sum_{i = 1}^{n}w_i(t)x_i,
+\end{align*}
+где
+\begin{align*}
+w_i(t) = K(\frac{t-i}{b}) / \sum_{j = 1}^{n}K(\frac{t-j}{b}).
+\end{align*}
+
+Обычно $K(z) = \frac{1}{\sqrt{2\pi}} \exp(-z^2 / 2)$.
+
+```{r}
+plot(uk, type='l', ylab="EXP")
+trend.sm <- ksmooth(time(uk), uk, 'normal', bandwidth = 2)
+lines(trend.sm, col='red')
+
+plot(uk - trend.sm$y)
+periodogramBuilder(uk, trend.sm$y)
+```
+
+##Nearest Neighbor Regression
+
+Строим линейную регрессию на $k$ ближайших соседей. Т.е. предсказываем $x_t$ по $\{x_{t-k/2},\ldots, x_t,\ldots, x_{t+k/2}\}$.
+
+```{r}
+plot(uk, type='l', ylab="m £")
+neigh.t <- supsmu(time(uk), uk, span = .5)
+neigh.s <- supsmu(time(uk), uk, span = .01)
+lines(neigh.t, col='red')
+lines(neigh.s, col='blue')
+
+
+plot(uk - neigh.t$y)
+periodogramBuilder(uk, neigh.t$y)
+plot(uk - neigh.s$y)
+periodogramBuilder(uk, neigh.s$y)
+```
+
+#Seasonal and Trend Decomposition (STL)
+
+
+Хотим представить ряд в виде $X_n = T_n + S_n + N_n$.
+
+Будем делать все для логарифмированного ряда, так как он похож на линейную модель (амплитуда примерно одинакова). Можно заменить далее сложение на умножение, разность на деление и получить алгоритм для мультипликативной модели.
+
+Хорошее описание алгоритма нашел здесь:
+http://www.abs.gov.au/websitedbs/d3310114.nsf/51c9a3d36edfd0dfca256acb00118404/c890aa8e65957397ca256ce10018c9d8!opendocument
+
+* Начальная оценка тренда. Применяем скользящее среднее с длиной окна T, в нашем случе кратной 12.
+
+
+```{r}
+T1 <- MovAvg(log(uk), 24)
+SN1 <- log(uk) - T1
+periodogramBuilder(log(uk), T1)
+```
+
+* Получили ряд в виде $X_n = \widetilde{T}_n + \widetilde{S_n + N_n}$
+
+*  Оценка сезонной компоненты. Сглаживаем $\widetilde{S_n + N_n}$ с маленьким окном. Получаем $\widetilde{S_n + N_n} = \widetilde{S}_n + \widetilde{N}_n$. 
+
+* Убираем полученную сезонность из исходного ряда, получаем оценку исправленного ряда (adjusted).
+
+
+```{r}
+S1 <- MovAvg(SN1, 2)
+ADJ1 <- log(uk) - S1
+periodogramBuilder(SN1, S1)
+```
+* Улучшенная оценка тренда. Применяем скользящее среднее с большим окном к исправленному ряду $X_n - \widetilde{S}_n$, получаем $\widetilde{\widetilde{T}}_n +  \widetilde{\widetilde{N}}_n$
+
+* Отсюда второй раз оцениваем $\widetilde{\widetilde{S_n + N_n}} = X_n - \widetilde{\widetilde{T}}_n$
+
+```{r}
+T2 <- MovAvg(ADJ1, 24)
+SN2 <- log(uk) - T2
+periodogramBuilder(ADJ1, T2)
+```
+
+* Применяем скользящее среднее с маленьким окном к $\widetilde{\widetilde{S_n + N_n}}$, получаем $\widetilde{\widetilde{S}}_n +  \widetilde{\widetilde{\widetilde{N}}}_n$. Cнова оцениваем исправленный ряд
+```{r}
+S2 <- MovAvg(SN2, 2)
+ADJ2 <- log(uk) - S2
+periodogramBuilder(SN2, S2)
+```
+
+* Финальная оценка тренда и шума
+
+```{r}
+T3 <- MovAvg(ADJ2, 24)
+N1 <- ADJ2 - T3
+periodogramBuilder(ADJ2, T3)
+```
+
+
+
+* Получили $X_n = \widetilde{\widetilde{T}}_n + \widetilde{\widetilde{S}}_n +  \widetilde{\widetilde{\widetilde{N}}}_n$
+
+```{r, fig.height=10, fig.width=8}
+par(mfrow=c(4,1))
+plot(log(uk), type = 'l', ylab='Original')
+plot(T3, type='l', ylab='Trend')
+plot(S2, type='l', ylab = 'Seasonal Component')
+plot(N1, type='l', ylab='Noise')
+```
+
+```{r}
+acf(N1, lag.max = 100)
+```
+Шум белым не получился. Как видно из последних периодограмм, много периодических компонент так и не выделились в сезонную компоненту.
+
+
+#STL (LOESS)
+
+```{r, fig.width=10, fig.height=10}
+uk.stl <- stl(uk, s.window = 13, l.window = 13, outer = 0, inner = 2, t.window = 35)
+plot(uk.stl)
+```
+
+##Стабилизация дисперсии
+
+Остаток после stl
+```{r}
+rem <- uk.stl$time.series[,3]
+plot(rem)
+```
+
+Прологорифмируем исходный ряд и снова посмотрим на остаток после выделения тренда.
+```{r}
+uk.log <- log(uk)
+uk.log.stl <- stl(uk.log, s.window = 13, l.window = 13, outer = 0, inner = 2, t.window = 35)
+log.rem <- uk.log.stl$time.series[,3]
+plot(log.rem)
+```
+
+Оценим дисперсию
+
+Идея 
+* Выделив тренд, получили шум с некоторой дисперсией $\xi_n = \sigma(n)\eps_n$
+
+* Выделить тренд у $\xi_n^2 = \sigma(n)^2\eps_n^2$ -- все равно, что найти среднее $\mathbf{E}\xi_n^2 = \sigma(n)^2$
+
+Возведем остаток в квадрат и выделим тренд скользящим средним
+```{r}
+dif.sqr <- ts(log.rem^2)
+plot(dif.sqr, type = 'l')
+sigma.n.sqr <- MovAvg(dif.sqr, 24)
+lines(sigma.n.sqr, col='red')
+legend("topleft", c("Rem^2", "sigma(n)^2"), lty=c(1,1), lwd=c(2.5,2.5),col=c("black","red"))
+```
+
+Построим огибающую 
+```{r}
+noise <- ts(log.rem / sqrt(sigma.n.sqr))
+plot(log.rem, type = 'l')
+lines(ts(sqrt(sigma.n.sqr), start = c(1980, 1), frequency = 12), col = 'blue')
+lines(ts(-sqrt(sigma.n.sqr), start = c(1980, 1), frequency = 12), col = 'blue')
+```
+
+Оценка шума, ее периодограмма и автоковариационная функция
+```{r}
+plot(noise)
+spec.pgram(na.omit(noise), detrend = FALSE, fast = FALSE, log='no', taper=0)
+acf(noise, lag.max = 50)
+```
+
+
+
+
+
+
+
